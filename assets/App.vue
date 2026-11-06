@@ -3,8 +3,8 @@
       @dragenter.prevent 
       @dragover.prevent 
       @drop.prevent="onDrop"
-      :style="{ backgroundImage: `url('${backgroundImageUrl}')` }"
   >
+    <canvas ref="starfield" class="starfield"></canvas>
     <progress v-if="uploadProgress !== null" :value="uploadProgress" max="100"></progress>
     <UploadPopup v-model="showUploadPopup" @upload="onUploadClicked" @createFolder="createFolder"></UploadPopup>
     <button class="upload-button circle" @click="showUploadPopup = true">
@@ -41,7 +41,7 @@
           </svg>
         </button>
         <Menu v-model="showMenu"
-          :items="[{ text: '按照名称排序A-Z' }, { text: '按照大小递增排序' }, { text: '按照大小递减排序' }, { text: '粘贴文件到网盘' }]"
+          :items="menuItems"
           @click="onMenuClick" />
       </div>
     </div>
@@ -115,10 +115,10 @@
         </li>
       </ul>
     </div>
-    <div v-if="loading" style="margin: 20px 0; text-align: center">
+    <div v-if="loading" class="list-tip" style="margin: 20px 0; text-align: center">
       <span style="font-size: 20px;">加载中...</span>
     </div>
-    <div v-else-if="!filteredFiles.length && !filteredFolders.length" style="margin: 20px 0; text-align: center">
+    <div v-else-if="!filteredFiles.length && !filteredFolders.length" class="list-tip" style="margin: 20px 0; text-align: center">
       <span style="font-size: 20px;">没有文件</span>
     </div>
     <Dialog v-model="showContextMenu">
@@ -203,17 +203,34 @@ export default {
     clipboard: null,
     focusedItem: null,
     loading: false,
-    order: null,
+    sortBy: "name",
+    sortAsc: true,
     search: "",
     showContextMenu: false,
     showMenu: false,
     showUploadPopup: false,
     uploadProgress: null,
     uploadQueue: [],
-    backgroundImageUrl: "/assets/bg-light.webp"
   }),
 
   computed: {
+    menuItems() {
+      const sorts = [
+        ["文件名", "name"],
+        ["文件类型", "type"],
+        ["文件大小", "size"],
+        ["修改时间", "time"],
+      ];
+      return [
+        ...sorts.map(([label, key]) => ({
+          text:
+            label +
+            (this.sortBy === key ? (this.sortAsc ? " ↑" : " ↓") : ""),
+        })),
+        { text: "粘贴文件到网盘" },
+      ];
+    },
+
     filteredFiles() {
       let files = this.files;
       if (this.search) {
@@ -221,7 +238,27 @@ export default {
           file.key.split("/").pop().includes(this.search)
         );
       }
-      return files;
+      const nameOf = (f) => f.key.split("/").pop();
+      const typeOf = (f) =>
+        (f.httpMetadata && f.httpMetadata.contentType) || "";
+      const dir = this.sortAsc ? 1 : -1;
+      const compare = (a, b) => {
+        let cmp = 0;
+        if (this.sortBy === "type") {
+          cmp =
+            typeOf(a).localeCompare(typeOf(b)) ||
+            nameOf(a).localeCompare(nameOf(b), "zh-CN", { numeric: true });
+        } else if (this.sortBy === "size") {
+          cmp = (a.size || 0) - (b.size || 0);
+        } else if (this.sortBy === "time") {
+          cmp =
+            new Date(a.uploaded).getTime() - new Date(b.uploaded).getTime();
+        } else {
+          cmp = nameOf(a).localeCompare(nameOf(b), "zh-CN", { numeric: true });
+        }
+        return cmp * dir;
+      };
+      return [...files].sort(compare);
     },
 
     filteredFolders() {
@@ -229,7 +266,10 @@ export default {
       if (this.search) {
         folders = folders.filter((folder) => folder.includes(this.search));
       }
-      return folders;
+      const dir = this.sortAsc ? 1 : -1;
+      return [...folders].sort(
+        (a, b) => a.localeCompare(b, "zh-CN", { numeric: true }) * dir
+      );
     },
   },
 
@@ -272,13 +312,6 @@ export default {
         .then((res) => res.json())
         .then((files) => {
           this.files = files.value;
-          if (this.order) {
-            this.files.sort((a, b) => {
-              if (this.order === "size") {
-                return b.size - a.size;
-              }
-            });
-          }
           this.folders = files.folders;
           this.loading = false;
         });
@@ -294,6 +327,75 @@ export default {
       return `${size.toFixed(1)} ${units[i]}`;
     },
 
+    initStarfield() {
+      const canvas = this.$refs.starfield;
+      const ctx = canvas.getContext("2d");
+      let rafId = 0;
+      let stars = [];
+      let width = 0;
+      let height = 0;
+
+      const createStars = () => {
+        const count = Math.min(320, Math.round((width * height) / 5500));
+        const palette = [
+          "255,255,255",
+          "255,255,255",
+          "170,200,255",
+          "255,230,180",
+        ];
+        stars = Array.from({ length: count }, () => ({
+          x: Math.random() * width,
+          y: Math.random() * height,
+          r: Math.random() * 1.3 + 0.4,
+          alpha: Math.random() * 0.5 + 0.35,
+          speed: Math.random() * 1.6 + 0.4,
+          phase: Math.random() * Math.PI * 2,
+          vx: (Math.random() - 0.5) * 0.05,
+          vy: (Math.random() - 0.5) * 0.05,
+          color: palette[Math.floor(Math.random() * palette.length)],
+        }));
+      };
+
+      const resize = () => {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        createStars();
+      };
+
+      const draw = (now) => {
+        const t = now / 1000;
+        ctx.clearRect(0, 0, width, height);
+        for (const s of stars) {
+          s.x += s.vx;
+          if (s.x < 0) s.x += width;
+          else if (s.x > width) s.x -= width;
+          s.y += s.vy;
+          if (s.y < 0) s.y += height;
+          else if (s.y > height) s.y -= height;
+          const twinkle = 0.55 + 0.45 * Math.sin(t * s.speed + s.phase);
+          ctx.globalAlpha = s.alpha * twinkle;
+          ctx.fillStyle = `rgb(${s.color})`;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        rafId = requestAnimationFrame(draw);
+      };
+
+      window.addEventListener("resize", resize);
+      resize();
+      rafId = requestAnimationFrame(draw);
+      this.starfieldCleanup = () => {
+        cancelAnimationFrame(rafId);
+        window.removeEventListener("resize", resize);
+      };
+    },
+
     onDrop(ev) {
       let files;
       if (ev.dataTransfer.items) {
@@ -305,28 +407,23 @@ export default {
     },
 
     onMenuClick(text) {
-      switch (text) {
-        case "按照名称排序A-Z":
-          this.order = null;
-          break;
-        case "按照大小递增排序":
-          this.order = "大小↑";
-          break;
-        case "按照大小递减排序":
-          this.order = "大小↓";
-          break;
-        case "粘贴文件到网盘":
-          return this.pasteFile();
-      }
-      this.files.sort((a, b) => {
-        if (this.order === "大小↑") {
-          return a.size - b.size;
-        } else if (this.order === "大小↓") {
-          return b.size - a.size;
+      const sortMap = {
+        "文件名": "name",
+        "文件类型": "type",
+        "文件大小": "size",
+        "修改时间": "time",
+      };
+      const key = sortMap[text.replace(/ [↑↓]$/, "").trim()];
+      if (key) {
+        if (this.sortBy === key) {
+          this.sortAsc = !this.sortAsc;
         } else {
-          return a.key.localeCompare(b.key);
+          this.sortBy = key;
+          this.sortAsc = true;
         }
-      });
+        return;
+      }
+      if (text === "粘贴文件到网盘") this.pasteFile();
     },
 
     onUploadClicked(fileElement) {
@@ -603,6 +700,14 @@ export default {
     },
   },
 
+  mounted() {
+    this.initStarfield();
+  },
+
+  beforeUnmount() {
+    if (this.starfieldCleanup) this.starfieldCleanup();
+  },
+
   created() {
     window.addEventListener("popstate", (ev) => {
       const searchParams = new URL(window.location).searchParams;
@@ -625,11 +730,18 @@ export default {
 .main {
   display: flex;
   height: 100%;
-  /* background-image: url(/assets/bg-light.webp); */
-  background-size: cover;
-  background-position: center;
+  background: linear-gradient(180deg, #05070f 0%, #0c1124 45%, #1b2735 100%);
   overflow-y: auto;
   flex-direction: column;
+}
+
+.starfield {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
+  pointer-events: none;
 }
 
 .app-bar {
@@ -637,8 +749,14 @@ export default {
   position: sticky;
   top: 0;
   padding: 8px;
-  background-color: white;
+  background-color: rgba(10, 15, 35, 0.55);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   display: flex;
+}
+
+.app-title {
+  color: #f5f5f5;
 }
 
 @media (max-width: 400px) {
@@ -673,6 +791,8 @@ export default {
   padding: 10px;
   width: 60%;
   max-width: 95%;
+  position: relative;
+  z-index: 1;
   background: rgba(255, 255, 255, 0.5);
   backdrop-filter: blur(10px);
   border-radius: 12px;
@@ -699,5 +819,15 @@ export default {
   position: absolute;
   top: 100%;
   right: 0;
+}
+
+.list-tip {
+  position: relative;
+  z-index: 1;
+}
+
+.footer {
+  position: relative;
+  z-index: 1;
 }
 </style>
